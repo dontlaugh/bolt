@@ -5,14 +5,14 @@ require 'bolt/node/errors'
 
 module Bolt
   module Transport
-    class LXD < Base
-      class ExecConnection
-        attr_reader :target
+    class LXD < Simple
+      class Connection
+        attr_reader :user, :target
 
-        def initialize(target)
+        def initialize(target, _options)
           @target = target
-          # TODO: if remote unset in config, default to globally-set remote
-          #  might need to shell out for this info
+          @user = ENV['USER'] || Etc.getlogin
+          @options = options
           @lxd_remote = @target.config.dig('lxd', 'remote') || default_remote
           @logger = Bolt::Logger.logger(target.safe_name)
         end
@@ -38,24 +38,52 @@ module Bolt
           [out, err, status]
         end
 
-        def execute(*command, options)
+        def shell
+          Bolt::Shell::Bash.new(target, self)
+        end
+
+        def execute(command)
           container = @target.uri
           remote = @lxd_remote
-
-          envs = []
-          if options[:environment]
-            options[:environment].each { |env, val| envs.concat(['--env', "#{env}=#{val}"]) }
+          env_vars = []
+          if command.start_with?("PT_")
+            parts = Shellwords.split(command)
+            env_vars, command = parts.partition { |p| p.start_with?("PT_") }
+            command = Shellwords.shelljoin(command)
           end
 
           command_options = []
-          command_options.concat(envs) unless envs.empty?
+          # See `lxc exec --help` for information on flags`
+          env_vars.each do |env_var|
+            command_options += %W[--env #{env_var}]
+          end
+
+          lxc_command = Shellwords.split(command)
 
           @logger.info { "Executing: exec #{command_options}" }
           capture_options = { binmode: true }
-          capture_options[:stdin_data] = options[:stdin] unless options[:stdin].nil?
+          # capture_options[:stdin_data] = options[:stdin] unless options[:stdin].nil?
           out, err, status = Open3.capture3('lxc', 'exec', *command_options, "#{remote}:#{container}",
-                                            '--', *command, capture_options)
+                                            '--', *lxc_command, capture_options)
           [out, err, status]
+        end
+
+        def upload(source, destination)
+          if File.directory?(source)
+            write_remote_directory(source, destination)
+          else
+            write_remote_file(source, destination)
+          end
+          Bolt::Result.for_upload(target, source, destination)
+        end
+
+        def download(source, destination, _download)
+          download = File.join(destination, Bolt::Util.unix_basename(source))
+          _stdout_str, stderr_str, status = download_file(source, destination)
+          unless status.exitstatus.zero?
+            raise "Error downloading content from container #{@target}: #{stderr_str}"
+          end
+          Bolt::Result.for_download(target, source, destination, download)
         end
 
         def write_remote_directory(source, destination)
@@ -88,7 +116,6 @@ module Bolt
         end
 
         def with_remote_tmpdir
-          # TODO
           dir = make_tmpdir
           yield dir
         ensure
@@ -121,7 +148,6 @@ module Bolt
         end
 
         def mkdirs(dirs)
-          # TODO
           _, stderr, exitcode = execute('mkdir', '-p', *dirs, {})
           if exitcode != 0
             message = "Could not create directories: #{stderr}"
@@ -130,7 +156,6 @@ module Bolt
         end
 
         def make_tmpdir
-          # TODO
           tmpdir = @target.options.fetch('tmpdir', container_tmpdir)
           tmppath = "#{tmpdir}/#{SecureRandom.uuid}"
 
