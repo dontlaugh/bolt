@@ -9,7 +9,7 @@ module Bolt
       class Connection
         attr_reader :user, :target
 
-        def initialize(target, _options)
+        def initialize(target, options)
           @target = target
           @user = ENV['USER'] || Etc.getlogin
           @options = options
@@ -74,7 +74,7 @@ module Bolt
           else
             write_remote_file(source, destination)
           end
-          Bolt::Result.for_upload(target, source, destination)
+          Bolt::Result.for_upload(@target, source, destination)
         end
 
         def download(source, destination, _download)
